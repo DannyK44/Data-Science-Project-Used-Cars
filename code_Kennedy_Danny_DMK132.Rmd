@@ -1,0 +1,314 @@
+---
+title: "1361_Project_Ideas"
+author: "Danny Kennedy"
+date: "2025-04-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Reading in the data
+
+```{r}
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+```
+
+# Cleaning the data and making dummy variables
+
+```{r}
+# creating the accident column
+train$accident <- ifelse(train$accident == "At least 1 accident or damage reported", 1, 0)
+test$accident <- ifelse(test$accident == "At least 1 accident or damage reported", 1, 0)
+
+# creating fuel type dummy variables and deleting original column
+train$gasoline <- ifelse(train$fuel_type == "Gasoline", 1, 0)
+train$diesel <- ifelse(train$fuel_type == "Diesel", 1, 0)
+train$hybrid <- ifelse(train$fuel_type == "Hybrid", 1, 0)
+train <- train[,-6]
+
+test$gasoline <- ifelse(test$fuel_type == "Gasoline", 1, 0)
+test$diesel <- ifelse(test$fuel_type == "Diesel", 1, 0)
+test$hybrid <- ifelse(test$fuel_type == "Hybrid", 1, 0)
+test <- test[,-5]
+```
+
+* Making the accident predictor be a binary numeric predictor that is 1 if there is some accident history and a 0 if not
+
+* Creating dummy variables for gasoline, diesel, and hybrid types with flex fuel as the baseline category
+
+* Getting rid of the original fuel_type character variable
+
+```{r}
+# dealing with transmission predictors
+train$automatic <- ifelse(train$transmission_type == "A/T", 1, 0)
+train$manual <- ifelse(train$transmission_type == "M/T", 1, 0)
+train$continuous <- ifelse(train$transmission_type == "CVT", 1, 0)
+train <- train[,-12]
+
+test$automatic <- ifelse(test$transmission_type == "A/T", 1, 0)
+test$manual <- ifelse(test$transmission_type == "M/T", 1, 0)
+test$continuous <- ifelse(test$transmission_type == "CVT", 1, 0)
+test <- test[,-11]
+```
+
+* Creating dummy variables for automatic transmission, manual transmission, and continuous variable transmission using A/T and M/T as the baseline category
+
+```{r}
+# getting rid of the useless id "predictor" for the training set
+train <- train[,-1]
+```
+
+* the id variable has no meaning so I do not want to incorporate into any models
+
+```{r}
+# dealing with the model_year column
+train$model_year <- train$model_year - 1996
+test$model_year <- test$model_year - 1996
+```
+
+* to make the effect of model year pronounced, the model_year column will now represent how many years newer than the oldest car (1996) each car is.
+
+```{r}
+# showing that the Maserati outlier is extremely influential and should be removed
+model <- lm(price ~ ., data=train)
+cook <- cooks.distance(model)
+plot(cook)
+
+# removing the extreme outlier
+train <- train[-275,]
+```
+
+* The one observation of the Maserati that is $2.9 million is clearly a major outlier on this plot. It is an extremely influential point and should be removed.
+
+
+# Splitting up the training set
+
+```{r}
+set.seed(2)
+index_train <- sample(1:1808, 1000, replace=FALSE)
+train_train <- train[index_train,]
+train_test <- train[-index_train, ]
+```
+
+# Doing the most basic linear model
+
+```{r}
+basic_lm <- lm(price ~ ., data=train_train)
+summary(basic_lm)
+
+pred <- predict(basic_lm, newdata=train_test)
+mean((pred-train_test$price)^2)
+```
+
+* test MSE = 0.1133881
+
+# Trying Forward Selection using AIC
+
+```{r, warning=FALSE}
+library(MASS)
+
+min_model <- lm(price ~ 1, data=train_train)
+max_model <- formula(basic_lm)
+
+forward_AIC <- step(min_model, direction="forward", scope= max_model)
+anova(forward_AIC)
+
+pred <- predict(forward_AIC, newdata=train_test)
+mean((pred-train_test$price)^2)
+```
+
+* Test MSE = 0.1114992
+
+# Forward BIC model
+
+```{r}
+### forward selection model using BIC
+min_model <- lm(price ~ 1, data=train_train)
+max_model <- formula(basic_lm)
+
+forward_BIC <- step(min_model, direction="forward", scope= max_model, k=log(1000))
+anova(forward_BIC)
+summary(forward_BIC)
+pred <- predict(forward_BIC, newdata=train_test)
+mean((pred-train_test$price)^2)
+```
+
+* test MSE = 0.1109639
+
+```{r}
+# residual plot for FORWARD_BIC model
+train_test$pred <- predict(forward_BIC, newdata=train_test)
+train_test$res <- train_test$price - train_test$pred
+plot(train_test$pred, train_test$res, xlab="Predicted Log Price", ylab="Residual")
+abline(h=0)
+train_test <- train_test[,-17:-18]
+```
+
+* The residual plot shows no obvious violates of OLS assumptions.
+
+# Lasso Model
+
+```{r}
+# getting rid of all character variables to fit lasso and ridge
+lasso_train_train <- train_train
+lasso_train_test <- train_test
+
+lasso_train_train <- lasso_train_train[,-6]
+lasso_train_test <- lasso_train_test[,-6]
+
+lasso_train_train <- lasso_train_train[,-5]
+lasso_train_test <- lasso_train_test[,-5]
+
+lasso_train_train <- fastDummies::dummy_cols(lasso_train_train, select_columns = "brand")
+lasso_train_test <- fastDummies::dummy_cols(lasso_train_test, select_columns = "brand")
+
+lasso_train_train <- lasso_train_train[,-2]
+lasso_train_test <- lasso_train_test[,-2]
+
+```
+
+```{r, warning=FALSE}
+### fitting a lasso model
+library(glmnet)
+
+# the lasso model needs the data to be a matrix, not a data frame
+Train_train <- as.matrix(lasso_train_train)
+Train_test <- as.matrix(lasso_train_test)
+
+# choosing lambda by cross-validation
+cv.out <- cv.glmnet(Train_train[, -1], Train_train[, 1], alpha=1)
+bestlam <- cv.out$lambda.min
+
+lasso.mod <- glmnet(Train_train[, -1], Train_train[, 1], alpha = 1, lambda = bestlam)
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = Train_test[, -1])
+
+# reporting the test error
+mean((lasso.pred - Train_test[, 1])^2)
+
+lasso.mod$beta
+```
+
+* test MSE = 0.1106878
+
+* **This is the new lowest error rate!**
+
+```{r}
+# Ridge Regression
+# choosing lambda by cross-validation
+cv.out <- cv.glmnet(Train_train[, -1], Train_train[, 1], alpha=0)
+bestlam <- cv.out$lambda.min
+
+ridge.mod <- glmnet(Train_train[, -1], Train_train[, 1], alpha = 0, lambda = bestlam)
+ridge.pred <- predict(ridge.mod, s = bestlam, newx = Train_test[, -1])
+
+# reporting the test error
+mean((ridge.pred - Train_test[, 1])^2)
+```
+
+* test MSE = 0.1120411
+
+* This MSE is slightly worse than all of the previous models
+
+# Regression trees
+```{r, warning=FALSE}
+library(tree)
+
+# using all available predictors
+simple.tree <- tree(price ~., data=train_train)
+summary(simple.tree)
+
+plot(simple.tree)
+text(simple.tree, pretty=0, cex=0.6)
+
+pred <- predict(simple.tree, newdata=train_test)
+mean((pred - train_test$price)^2)
+```
+
+* This is a high test MSE of 0.2127
+
+# Bagged Trees
+```{r, warning=FALSE}
+library(randomForest)
+set.seed(2)
+
+# fitting a model using bagging (all predictors at each split)
+bag.trees <- randomForest(price ~ ., data=train_train, mtry=15, ntree=100, importance=TRUE)
+bag.trees
+
+# test MSE obtained
+pred <- predict(bag.trees, newdata=train_test)
+mean((pred-train_test$price)^2)
+
+# which vars are the most important
+importance(bag.trees)
+```
+
+* A test MSE of 0.108327 is a new low so bagging is currently the best model.
+
+```{r}
+# residual plot for bag.trees model
+train_test$pred <- predict(bag.trees, newdata=train_test)
+train_test$res <- train_test$price - train_test$pred
+plot(train_test$pred, train_test$res, xlab="Predicted Log Price", ylab="Residual")
+abline(h=0)
+train_test <- train_test[,-17:-18]
+```
+
+# Random Forest
+```{r, warning=FALSE}
+set.seed(2)
+library(randomForest)
+
+# tuning the mtry parameter
+tune_results <- tuneRF(x = train_train[,-1], y = train_train[,1], mtryStart = 2, stepFactor = 1.5,
+                       trace = TRUE, plot = TRUE)
+best_mtry <- tune_results[which.min(tune_results[,2]), 1]
+
+rf_model <- randomForest(train_train[,-1], train_train[,1], mtry = best_mtry, importance = TRUE)
+importance(rf_model)
+
+# calculating test MSE
+pred <- predict(rf_model, newdata=train_test)
+mean((pred-train_test$price)^2)
+```
+
+* test MSE = 0.1021304, **which is the lowest of any model.**
+```{r}
+# residual plot for rf_model model
+train_test$pred <- predict(rf_model, newdata=train_test)
+train_test$res <- train_test$price - train_test$pred
+plot(train_test$pred, train_test$res, xlab="Predicted Log Price", ylab="Residual")
+abline(h=0)
+train_test <- train_test[,-17:-18]
+```
+
+```{r}
+# checking normality of residuals
+train_test$pred <- predict(rf_model, newdata=train_test)
+train_test$res <- train_test$price - train_test$pred
+hist(train_test$res, breaks = 25, xlab= "Residual", main= "Histogram of RF Residuals")
+train_test <- train_test[,-17:-18]
+```
+
+* Residuals appear to be roughly normal
+
+# Making the predicted prices on the actual test set using random forest
+
+```{r}
+test$price <- predict(rf_model, newdata=test)
+test_final <- test[,-2:-16]
+```
+
+
+
+
+
+
+
+
+
+
+
